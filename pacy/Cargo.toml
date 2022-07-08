@@ -10,4 +10,5 @@ repository = "https://github.com/BVE-Reborn/pacy"
 
 [dependencies]
 log = "0.4"
+profiling = "1"
 spin_sleep = "1"

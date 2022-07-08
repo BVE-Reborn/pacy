@@ -1,4 +1,7 @@
 fn main() {
+    #[cfg(feature = "tracy")]
+    tracy_client::Client::start();
+
     let backends = wgpu::util::backend_bits_from_env().unwrap_or_else(wgpu::Backends::all);
     let instance = wgpu::Instance::new(backends);
 
@@ -32,6 +35,7 @@ fn main() {
 
     let mut size = window.inner_size();
     let mut scale_factor = window.scale_factor() as f32;
+    let mut vblank_interval = get_vblank_interval(&window);
     let preferred_swapchain_format = surface.get_supported_formats(&adapter)[0];
     surface.configure(
         &device,
@@ -74,18 +78,35 @@ fn main() {
                 winit::event::WindowEvent::CloseRequested => {
                     *control_flow = winit::event_loop::ControlFlow::Exit
                 }
+                winit::event::WindowEvent::Moved(..) => {
+                    vblank_interval = get_vblank_interval(&window);
+                }
+                winit::event::WindowEvent::Resized(new_size) => {
+                    size = new_size;
+                    surface.configure(
+                        &device,
+                        &wgpu::SurfaceConfiguration {
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            format: preferred_swapchain_format,
+                            width: size.width,
+                            height: size.height,
+                            // FIFO is _always_ supported
+                            present_mode: wgpu::PresentMode::Fifo,
+                        },
+                    );
+                }
                 _ => {}
             },
             // TODO: resume/suspend
             winit::event::Event::MainEventsCleared => {
-                let vblank_interval = (window.current_monitor().unwrap().video_modes().next().unwrap().refresh_rate() as f32).recip();
+                profiling::scope!("Main Events Cleared");
                 pacer.start_frame(vblank_interval);
 
                 egui_platform.begin_frame();
 
                 let mut egui_ctx = egui_platform.context();
-                pacy_egui::show_window(&mut egui_ctx, &pacer);
- 
+                pacy_egui::show_window(&mut egui_ctx, &mut pacer);
+
                 let egui_output = egui_platform.end_frame(Some(&window));
                 let egui_primitives = egui_ctx.tessellate(egui_output.shapes);
 
@@ -94,7 +115,9 @@ fn main() {
                     physical_height: size.height,
                     scale_factor,
                 };
-                egui_renderpass.add_textures(&device, &queue, &egui_output.textures_delta).unwrap();
+                egui_renderpass
+                    .add_textures(&device, &queue, &egui_output.textures_delta)
+                    .unwrap();
                 egui_renderpass.update_buffers(
                     &device,
                     &queue,
@@ -128,16 +151,31 @@ fn main() {
 
                 drop(rpass);
 
-                egui_renderpass.remove_textures(egui_output.textures_delta).unwrap();
+                egui_renderpass
+                    .remove_textures(egui_output.textures_delta)
+                    .unwrap();
 
                 queue.submit(Some(encoder.finish()));
 
                 image.present();
 
+                profiling::finish_frame!();
                 pacer.end_frame();
+
                 pacer.wait_for_frame();
             }
             _ => {}
         }
     })
+}
+
+fn get_vblank_interval(window: &winit::window::Window) -> f32 {
+    let refresh = window
+        .current_monitor()
+        .unwrap()
+        .video_modes()
+        .next()
+        .unwrap()
+        .refresh_rate();
+    (refresh as f32).recip()
 }

@@ -24,8 +24,16 @@ impl FramePacer {
     }
 
     pub fn start_frame(&mut self, vblank_interval: f32) {
+        self.internals.cpu_input_time_history.reserve(1);
+
+        let input_end = Instant::now();
+        if let Some(current_cpu_input_start) = self.internals.current_cpu_input_start {
+            let input_time = input_end - current_cpu_input_start;
+            self.internals.cpu_input_time_history.push_back(input_time);
+        }
+
         self.internals.monitor.vblank_interval = Duration::from_secs_f32(vblank_interval);
-        self.internals.current_cpu_frame_start = Some(Instant::now());
+        self.internals.current_cpu_frame_start = Some(input_end);
     }
 
     pub fn end_frame(&mut self) -> Duration {
@@ -60,14 +68,25 @@ impl FramePacer {
             .push_back(after_frame_duration);
 
         let used_duration = wait_start - start;
-        let sleep_time = self
+        let mut sleep_time = self
             .internals
             .monitor
             .vblank_interval
             .saturating_sub(used_duration);
 
+        // TODO this is carp
+        if let Some(last_input_time) = self.internals.cpu_input_time_history.pop_back() {
+            sleep_time = sleep_time.saturating_sub(last_input_time);
+        }
+
         self.internals.cpu_sleep_time_history.push_back(sleep_time);
-        self.sleeper.sleep(sleep_time);
+        if self.options.enabled {
+            profiling::scope!("FramePacer::wait_for_frame");
+            self.sleeper.sleep(sleep_time);
+        }
+
+        let input_start_time = Instant::now();
+        self.internals.current_cpu_input_start = Some(input_start_time);
     }
 }
 
@@ -84,12 +103,14 @@ impl Default for Options {
 #[derive(Default)]
 pub struct Internals {
     pub current_cpu_frame_start: Option<Instant>,
-    pub current_cpu_sleep_time: Option<Duration>,
+    pub current_cpu_sleep_start_time: Option<Duration>,
     pub current_cpu_frame_end: Option<Instant>,
+    pub current_cpu_input_start: Option<Instant>,
 
     pub cpu_time_history: VecDeque<Duration>,
     pub cpu_post_frame_time_history: VecDeque<Duration>,
     pub cpu_sleep_time_history: VecDeque<Duration>,
+    pub cpu_input_time_history: VecDeque<Duration>,
 
     pub monitor: Monitor,
 }

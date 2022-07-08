@@ -5,6 +5,9 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+tracy = ["dep:tracy-client", "profiling/profile-with-tracy"]
+
 [dependencies]
 pacy = { path = "../../pacy" }
 pacy-egui = { path = "../../pacy-egui" }
@@ -16,3 +19,7 @@ egui_wgpu_backend = "0.18"
 egui_winit_platform = "0.15"
 winit = "0.26"
 wgpu = "0.13"
+
+tracy-client = { version = "0.13", optional = true }
+profiling = { version = "1" }
+
