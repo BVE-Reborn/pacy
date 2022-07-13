@@ -5,88 +5,61 @@ use std::{
 
 use spin_sleep::SpinSleeper;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct FrameStage(pub usize);
+
 pub struct FramePacer {
     pub options: Options,
     internals: Internals,
     sleeper: SpinSleeper,
 }
 impl FramePacer {
-    pub fn new() -> Self {
+    pub fn new(reported_frequency: f32) -> Self {
         Self {
             options: Options::default(),
-            internals: Internals::default(),
+            internals: Internals::new(Monitor::new(reported_frequency)),
             sleeper: SpinSleeper::default(),
         }
+    }
+
+    pub fn create_frame_stage(&mut self) -> FrameStage {
+        let id = self.internals.frame_stages.len();
+        self.internals.frame_stages.push(FrameStageStats::default());
+        FrameStage(id)
+    }
+
+    pub fn set_monitor_frequency(&mut self, frequency: f32) {
+        self.internals.monitor.reported_frequency = frequency;
     }
 
     pub fn internals(&self) -> &Internals {
         &self.internals
     }
 
-    pub fn start_frame(&mut self, vblank_interval: f32) {
-        self.internals.cpu_input_time_history.reserve(1);
-
-        let input_end = Instant::now();
-        if let Some(current_cpu_input_start) = self.internals.current_cpu_input_start {
-            let input_time = input_end - current_cpu_input_start;
-            self.internals.cpu_input_time_history.push_back(input_time);
-        }
-
-        self.internals.monitor.vblank_interval = Duration::from_secs_f32(vblank_interval);
-        self.internals.current_cpu_frame_start = Some(input_end);
+    pub fn begin_frame_stage(&mut self, stage_id: FrameStage) {
+        self.internals.frame_stages[stage_id.0].begin();
     }
 
-    pub fn end_frame(&mut self) -> Duration {
-        let start = self.internals.current_cpu_frame_start.unwrap();
-        let end = Instant::now();
-        self.internals.current_cpu_frame_end = Some(end);
-
-        let duration = end - start;
-        self.internals.cpu_time_history.push_back(duration);
-
-        let sleep_time = self
-            .internals
-            .monitor
-            .vblank_interval
-            .saturating_sub(duration);
-
-        sleep_time
+    pub fn end_frame_stage(&mut self, stage_id: FrameStage) {
+        self.internals.frame_stages[stage_id.0].end();
     }
 
     pub fn wait_for_frame(&mut self) {
-        // Make sure we've allocated space _before_ we take the current measurement.
-        self.internals.cpu_post_frame_time_history.reserve(1);
-        self.internals.cpu_sleep_time_history.reserve(1);
+        let next_frame_pipeline_duration: Duration = self
+            .internals
+            .frame_stages
+            .iter()
+            .map(FrameStageStats::estimate_time_for_completion)
+            .sum(); // TODO
 
-        let start = self.internals.current_cpu_frame_start.take().unwrap();
-        let wait_start = Instant::now();
-
-        let after_frame_duration =
-            wait_start - self.internals.current_cpu_frame_end.take().unwrap();
-        self.internals
-            .cpu_post_frame_time_history
-            .push_back(after_frame_duration);
-
-        let used_duration = wait_start - start;
-        let mut sleep_time = self
+        let sleep_duration = self
             .internals
             .monitor
-            .vblank_interval
-            .saturating_sub(used_duration);
+            .duration_until_next_hittable_timestamp(next_frame_pipeline_duration);
 
-        // TODO this is carp
-        if let Some(last_input_time) = self.internals.cpu_input_time_history.pop_back() {
-            sleep_time = sleep_time.saturating_sub(last_input_time);
-        }
+        self.internals.sleep_history.push_back(sleep_duration);
 
-        self.internals.cpu_sleep_time_history.push_back(sleep_time);
-        if self.options.enabled {
-            profiling::scope!("FramePacer::wait_for_frame");
-            self.sleeper.sleep(sleep_time);
-        }
-
-        let input_start_time = Instant::now();
-        self.internals.current_cpu_input_start = Some(input_start_time);
+        self.sleeper.sleep(sleep_duration);
     }
 }
 
@@ -100,28 +73,79 @@ impl Default for Options {
     }
 }
 
-#[derive(Default)]
 pub struct Internals {
-    pub current_cpu_frame_start: Option<Instant>,
-    pub current_cpu_sleep_start_time: Option<Duration>,
-    pub current_cpu_frame_end: Option<Instant>,
-    pub current_cpu_input_start: Option<Instant>,
+    pub frame_stages: Vec<FrameStageStats>,
 
-    pub cpu_time_history: VecDeque<Duration>,
-    pub cpu_post_frame_time_history: VecDeque<Duration>,
-    pub cpu_sleep_time_history: VecDeque<Duration>,
-    pub cpu_input_time_history: VecDeque<Duration>,
+    pub sleep_history: VecDeque<Duration>,
 
     pub monitor: Monitor,
 }
+impl Internals {
+    pub fn new(monitor: Monitor) -> Self {
+        Self {
+            frame_stages: Vec::new(),
+            sleep_history: VecDeque::new(),
+            monitor,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct FrameStageStats {
+    pub start_time: Option<Instant>,
+    pub end_time: Option<Instant>,
+
+    pub duration_history: VecDeque<Duration>,
+}
+impl FrameStageStats {
+    fn begin(&mut self) {
+        self.start_time = Some(Instant::now());
+    }
+
+    fn end(&mut self) {
+        self.duration_history.reserve(1);
+        self.end_time = Some(Instant::now());
+        self.duration_history
+            .push_back(self.end_time.unwrap() - self.start_time.unwrap());
+    }
+
+    pub fn estimate_time_for_completion(&self) -> Duration {
+        *self
+            .duration_history
+            .iter()
+            .rev()
+            .take(10)
+            .max()
+            .unwrap_or(&Duration::from_secs(0))
+    }
+}
 
 pub struct Monitor {
-    pub vblank_interval: Duration,
+    pub reported_frequency: f32,
+
+    pub last_reported_timestamp: Instant,
 }
-impl Default for Monitor {
-    fn default() -> Self {
+impl Monitor {
+    fn new(reported_frequency: f32) -> Self {
         Self {
-            vblank_interval: Duration::from_secs_f32(1.0 / 60.0),
+            reported_frequency,
+            last_reported_timestamp: Instant::now(),
         }
+    }
+
+    pub fn duration_until_next_hittable_timestamp(&self, compute_time: Duration) -> Duration {
+        // TODO: improve the precision of this calculation
+        let actual_vblank_secs = ((self.reported_frequency + 0.5).floor() - 0.5).recip();
+        let actual_vblank_nanos = (1_000_000_000.0 * actual_vblank_secs) as u128;
+
+        let now = Instant::now();
+
+        let compute_finished = now + compute_time;
+        let dur_since_timestamp = compute_finished - self.last_reported_timestamp;
+
+        let nanos_into_frame = dur_since_timestamp.as_nanos() % actual_vblank_nanos;
+        let nanos_remaining = actual_vblank_nanos - nanos_into_frame;
+
+        Duration::from_nanos(nanos_remaining as u64)
     }
 }

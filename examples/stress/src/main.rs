@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 fn main() {
     #[cfg(feature = "tracy")]
     tracy_client::Client::start();
@@ -34,8 +36,7 @@ fn main() {
     .unwrap();
 
     let mut size = window.inner_size();
-    let mut scale_factor = window.scale_factor() as f32;
-    let mut vblank_interval = get_vblank_interval(&window);
+    let scale_factor = window.scale_factor() as f32;
     let preferred_swapchain_format = surface.get_supported_formats(&adapter)[0];
     surface.configure(
         &device,
@@ -61,7 +62,8 @@ fn main() {
     let mut egui_renderpass =
         egui_wgpu_backend::RenderPass::new(&device, preferred_swapchain_format, 1);
 
-    let mut pacer = pacy::FramePacer::new();
+    let mut pacer = pacy::FramePacer::new(get_monitor_frequency(&window));
+    let cpu_stage = pacer.create_frame_stage();
 
     el.run(move |event, _window_target, control_flow| {
         egui_platform.handle_event(&event);
@@ -79,7 +81,7 @@ fn main() {
                     *control_flow = winit::event_loop::ControlFlow::Exit
                 }
                 winit::event::WindowEvent::Moved(..) => {
-                    vblank_interval = get_vblank_interval(&window);
+                    pacer.set_monitor_frequency(get_monitor_frequency(&window));
                 }
                 winit::event::WindowEvent::Resized(new_size) => {
                     size = new_size;
@@ -100,7 +102,7 @@ fn main() {
             // TODO: resume/suspend
             winit::event::Event::MainEventsCleared => {
                 profiling::scope!("Main Events Cleared");
-                pacer.start_frame(vblank_interval);
+                pacer.begin_frame_stage(cpu_stage);
 
                 egui_platform.begin_frame();
 
@@ -160,7 +162,7 @@ fn main() {
                 image.present();
 
                 profiling::finish_frame!();
-                pacer.end_frame();
+                pacer.end_frame_stage(cpu_stage);
 
                 pacer.wait_for_frame();
             }
@@ -169,13 +171,12 @@ fn main() {
     })
 }
 
-fn get_vblank_interval(window: &winit::window::Window) -> f32 {
-    let refresh = window
+fn get_monitor_frequency(window: &winit::window::Window) -> f32 {
+    window
         .current_monitor()
         .unwrap()
         .video_modes()
         .next()
         .unwrap()
-        .refresh_rate();
-    (refresh as f32).recip()
+        .refresh_rate() as f32
 }
