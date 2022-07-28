@@ -13,10 +13,12 @@ pacy = { path = "../../pacy" }
 pacy-egui = { path = "../../pacy-egui" }
 pacy-wgpu = { path = "../../pacy-wgpu" }
 
+flume = "0.10"
 pollster = "0.2"
 egui = "0.18"
 egui_wgpu_backend = "0.18"
 egui_winit_platform = "0.15"
+spin_sleep = "0.3"
 winit = "0.26"
 wgpu = "0.13"
 

@@ -5,8 +5,27 @@ use std::{
 
 use spin_sleep::SpinSleeper;
 
+pub trait ComparativeTimestamp: Copy {
+    fn difference(base: Self, new: Self) -> Duration;
+}
+
+impl ComparativeTimestamp for Instant {
+    fn difference(base: Self, new: Self) -> Duration {
+        new - base
+    }
+}
+
+impl ComparativeTimestamp for u64 {
+    fn difference(base: Self, new: Self) -> Duration {
+        Duration::from_nanos(new - base)
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct FrameStage(pub usize);
+pub struct FrameStage<T: ComparativeTimestamp> {
+    index: usize,
+    base: T,
+}
 
 pub struct FramePacer {
     pub options: Options,
@@ -22,10 +41,13 @@ impl FramePacer {
         }
     }
 
-    pub fn create_frame_stage(&mut self) -> FrameStage {
-        let id = self.internals.frame_stages.len();
-        self.internals.frame_stages.push(FrameStageStats::default());
-        FrameStage(id)
+    pub fn create_frame_stage<T>(&mut self, base: T) -> FrameStage<T>
+    where
+        T: ComparativeTimestamp,
+    {
+        let index = self.internals.frame_stages.len();
+        self.internals.frame_stages.push(FrameStageStats::new(self.internals.reference_instant.elapsed()));
+        FrameStage { index, base }
     }
 
     pub fn set_monitor_frequency(&mut self, frequency: f32) {
@@ -36,12 +58,18 @@ impl FramePacer {
         &self.internals
     }
 
-    pub fn begin_frame_stage(&mut self, stage_id: FrameStage) {
-        self.internals.frame_stages[stage_id.0].begin();
+    pub fn begin_frame_stage<T>(&mut self, stage_id: FrameStage<T>, now: T)
+    where
+        T: ComparativeTimestamp,
+    {
+        self.internals.frame_stages[stage_id.index].begin(T::difference(stage_id.base, now));
     }
 
-    pub fn end_frame_stage(&mut self, stage_id: FrameStage) {
-        self.internals.frame_stages[stage_id.0].end();
+    pub fn end_frame_stage<T>(&mut self, stage_id: FrameStage<T>, now: T)
+    where
+        T: ComparativeTimestamp,
+    {
+        self.internals.frame_stages[stage_id.index].end(T::difference(stage_id.base, now));
     }
 
     pub fn wait_for_frame(&mut self) {
@@ -59,7 +87,10 @@ impl FramePacer {
 
         self.internals.sleep_history.push_back(sleep_duration);
 
-        self.sleeper.sleep(sleep_duration);
+        if self.options.enabled {
+            profiling::scope!("FramePacer::wait_for_frame");
+            self.sleeper.sleep(sleep_duration);
+        }
     }
 }
 
@@ -74,6 +105,8 @@ impl Default for Options {
 }
 
 pub struct Internals {
+    pub reference_instant: Instant,
+
     pub frame_stages: Vec<FrameStageStats>,
 
     pub sleep_history: VecDeque<Duration>,
@@ -83,6 +116,7 @@ pub struct Internals {
 impl Internals {
     pub fn new(monitor: Monitor) -> Self {
         Self {
+            reference_instant: Instant::now(),
             frame_stages: Vec::new(),
             sleep_history: VecDeque::new(),
             monitor,
@@ -92,19 +126,28 @@ impl Internals {
 
 #[derive(Default)]
 pub struct FrameStageStats {
-    pub start_time: Option<Instant>,
-    pub end_time: Option<Instant>,
+    pub offset: Duration,
+
+    pub start_time: Option<Duration>,
+    pub end_time: Option<Duration>,
 
     pub duration_history: VecDeque<Duration>,
 }
 impl FrameStageStats {
-    fn begin(&mut self) {
-        self.start_time = Some(Instant::now());
+    fn new(offset: Duration) -> Self {
+        Self {
+            offset,
+            ..Default::default()
+        }
     }
 
-    fn end(&mut self) {
+    fn begin(&mut self, value: Duration) {
+        self.start_time = Some(self.offset + value);
+    }
+
+    fn end(&mut self, value: Duration) {
         self.duration_history.reserve(1);
-        self.end_time = Some(Instant::now());
+        self.end_time = Some(self.offset + value);
         self.duration_history
             .push_back(self.end_time.unwrap() - self.start_time.unwrap());
     }

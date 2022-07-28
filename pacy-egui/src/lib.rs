@@ -75,9 +75,11 @@ pub fn show_window(ctx: &mut egui::Context, pacer: &mut pacy::FramePacer) {
                     marks
                 })
                 .show(ui, |plot| {
-                    let iter = internals.frame_stages[0]
-                        .duration_history
+                    let contiguous_history: Vec<_> =
+                        internals.frame_stages[0].duration_history.iter().collect();
+                    let iter = contiguous_history
                         .iter()
+                        .copied()
                         .rev()
                         .take(100)
                         .enumerate()
@@ -85,7 +87,21 @@ pub fn show_window(ctx: &mut egui::Context, pacer: &mut pacy::FramePacer) {
                             x: 99.0 - rev_index as f64,
                             y: duration.as_secs_f64() * 1000.0,
                         });
-                    plot.line(Line::new(Values::from_values_iter(iter)))
+                    plot.line(Line::new(Values::from_values_iter(iter)));
+                    let iter2 = contiguous_history
+                        .windows(40)
+                        .map(|window| {
+                            let sum: Duration = window.iter().copied().sum();
+                            sum.as_secs_f64() / window.len() as f64
+                        })
+                        .rev()
+                        .take(100)
+                        .enumerate()
+                        .map(|(rev_index, duration)| Value {
+                            x: 99.0 - rev_index as f64,
+                            y: duration * 1000.0,
+                        });
+                    plot.line(Line::new(Values::from_values_iter(iter2)));
                 })
         });
 }
